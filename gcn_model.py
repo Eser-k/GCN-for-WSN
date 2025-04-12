@@ -1,197 +1,127 @@
 import tensorflow as tf
 from tensorflow.keras import layers, Model, Input
 
-#############################################
-# 1) Hilfsfunktion zur Normalisierung von A
-#############################################
+@tf.keras.utils.register_keras_serializable()
+def spread_out_fn(logits):
+    epsilon = 1e-8
+    mean = tf.reduce_mean(logits, axis=[1, 2], keepdims=True)
+    std = tf.math.reduce_std(logits, axis=[1, 2], keepdims=True) + epsilon
+    alpha = 1.2  
+    return (logits - mean) / std * alpha
+
+@tf.keras.utils.register_keras_serializable()
 def normalize_adjacency(A):
-    """
-    Normalisiert die Adjazenzmatrix A nach dem Ansatz von Kipf & Welling (GCN).
+    N = A.shape[-1]
+    I = tf.eye(N, batch_shape=A.shape[:-2])
     A_tilde = A + I
-    D_tilde(i,i) = Summe über Zeile i von A_tilde
-    A_hat = D_tilde^(-1/2) * A_tilde * D_tilde^(-1/2)   (wobei D_tilde^(-1/2) = 1/sqrt(D_tilde))
-
-    Parameter:
-    ----------
-    A : tf.Tensor
-        Unnormierte Adjazenzmatrix der Form (N, N) oder (batch_size, N, N)
-
-    Returns:
-    --------
-    A_hat : tf.Tensor
-        Normalisierte Adjazenzmatrix (gleiches Format wie A)
-    """
-    # Self-Loops hinzufügen: I hat die gleiche Größe wie A
-    I = tf.eye(A.shape[-1], batch_shape=A.shape[:-2])
-    A_tilde = A + I
-
-    # Berechne die Zeilensummen (Grad) für A_tilde
-    row_sum = tf.reduce_sum(A_tilde, axis=-1)  # Erwartete Form: (batch_size, N) oder (N,)
+    row_sum = tf.reduce_sum(A_tilde, axis=-1)
     D_inv_sqrt = tf.linalg.diag(1.0 / tf.sqrt(row_sum))
-    
-    # Berechne A_hat = D^(-1/2) * A_tilde * D^(-1/2)
     A_hat = tf.matmul(tf.matmul(D_inv_sqrt, A_tilde), D_inv_sqrt)
     return A_hat
 
-#############################################
-# 2) Custom Layer: Graph Convolution
-#############################################
+@tf.keras.utils.register_keras_serializable()
 class GraphConvolution(layers.Layer):
-    """
-    Führt eine Graph Convolution Operation durch:
-       Z = A_hat * X * W + b
-    wobei A_hat die normalisierte Adjazenzmatrix, X die Knoteneingaben und 
-    W, b die trainierbaren Parameter sind.
-    """
-    def __init__(self, output_dim, activation=None, **kwargs):
-        """
-        Initialisiert die GraphConvolution-Schicht.
-
-        Parameter:
-        - output_dim: Integer, der die Dimension des Ausgabe-Feature-Vektors 
-                      für jeden Knoten angibt.
-        - activation: Optionale Aktivierungsfunktion (z. B. 'relu', 'sigmoid').
-                      Falls None, wird keine Aktivierung angewendet.
-        - **kwargs: Zusätzliche benannte Argumente, die an tf.keras.layers.Layer
-                    weitergereicht werden.
-        """
+    def __init__(self, output_dim, activation=None, kernel_initializer=None, bias_initializer=None, **kwargs):
         super(GraphConvolution, self).__init__(**kwargs)
         self.output_dim = output_dim
-        self.activation = tf.keras.activations.get(activation)
+        self.activation = activation
+        self.kernel_initializer = kernel_initializer if kernel_initializer is not None else tf.keras.initializers.HeNormal()
+        self.bias_initializer = bias_initializer if bias_initializer is not None else tf.keras.initializers.HeNormal()
     
     def build(self, input_shape):
-        """
-        Initialisiert die trainierbaren Parameter der GraphConvolution-Schicht.
-
-        Parameter:
-        - input_shape: Eine Liste, die die Formen der Eingaben [X, A] enthält.
-          * X hat die Form (batch_size, N, F) (wobei N: Anzahl Knoten, F: Feature-Dimension)
-          * A hat die Form (batch_size, N, N) (Adjazenzmatrix)
-        """
         feature_dim = input_shape[0][-1]
         self.weight = self.add_weight(
             shape=(feature_dim, self.output_dim),
-            initializer='glorot_uniform',
+            initializer=self.kernel_initializer,
             trainable=True,
             name='weight'
         )
         self.bias = self.add_weight(
             shape=(self.output_dim,),
-            initializer='zeros',
+            initializer=self.bias_initializer,
             trainable=True,
             name='bias'
         )
-
+        super(GraphConvolution, self).build(input_shape)
+    
     def call(self, inputs):
-        """
-        Führt den Vorwärtsdurchlauf der GraphConvolution-Schicht durch.
-
-        Eingabe:
-        - inputs: Eine Liste [X, A_hat], wobei:
-            X:     Feature-Matrix der Knoten, Form (batch_size, N, F)
-            A_hat: Normalisierte Adjazenzmatrix, Form (batch_size, N, N)
-        Ablauf:
-        1. Aggregation: Multipliziert A_hat mit X, um die Features der Nachbarn zu aggregieren.
-        2. Transformation: Multipliziert das Ergebnis mit der Gewichtsmatrix (self.weight).
-        3. Bias hinzufügen: Addiert den Bias (self.bias).
-        4. Aktivierung: Wendet die Aktivierungsfunktion an (falls definiert).
-        Rückgabe:
-        - Z: Tensor der Form (batch_size, N, output_dim)
-        """
         X, A_hat = inputs
-        AX = tf.matmul(A_hat, X)  # (batch_size, N, F)
-        AXW = tf.matmul(AX, self.weight)  # (batch_size, N, output_dim)
+        AX = tf.matmul(A_hat, X)
+        AXW = tf.matmul(AX, self.weight)
         Z = AXW + self.bias
         if self.activation is not None:
-            Z = self.activation(Z)
+            Z = tf.keras.activations.get(self.activation)(Z)
         return Z
 
-#############################################
-# 3) GCN-Modell zusammenbauen
-#############################################
+    def get_config(self):
+        config = super(GraphConvolution, self).get_config()
+        config.update({
+            "output_dim": self.output_dim,
+            "activation": tf.keras.activations.serialize(tf.keras.activations.get(self.activation)),
+            "kernel_initializer": tf.keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": tf.keras.initializers.serialize(self.bias_initializer)
+        })
+        return config
+
 def build_gcn_model(num_nodes, feature_dim, hidden_units=16):
-    """
-    Erstellt ein GCN-Modell mit zwei GCN-Schichten und einem Fully Connected Block,
-    der aus zwei Dense-Schichten besteht, und einer abschließenden Output-Schicht zur 
-    Sigmoid-Ausgabe.
-
-    Parameter:
-    ----------
-    num_nodes : int
-        Anzahl der Knoten im Netzwerk (z. B. 100).
-    feature_dim : int
-        Anzahl der Merkmale pro Knoten.
-    hidden_units : int
-        Dimension des Ausgabevektors jeder GCN-Schicht (Hyperparameter).
-
-    Returns:
-    --------
-    model : tf.keras.Model
-        Ein Keras-Modell, das pro Knoten eine Sigmoid-Wahrscheinlichkeit ausgibt.
-    """
-    # Eingaben definieren: X_in hat Form (batch_size, N, F) und A_in hat Form (batch_size, N, N)
     X_in = Input(shape=(num_nodes, feature_dim), name='X_in')
     A_in = Input(shape=(num_nodes, num_nodes), name='A_in')
     
-    # Normalisiere die Adjazenzmatrix A_in.
-    A_hat = layers.Lambda(
-        lambda A: normalize_adjacency(A),
-        output_shape=lambda input_shape: input_shape,
-        name='Normalize'
-    )(A_in)
+    A_hat = layers.Lambda(normalize_adjacency,
+                          output_shape=lambda input_shape: (input_shape[0], input_shape[1], input_shape[2]),
+                          name='Normalize')(A_in)
     
-    # Erste GCN-Schicht mit ReLU-Aktivierung.
-    gc1 = GraphConvolution(hidden_units, activation='relu')([X_in, A_hat])
+    gc1 = GraphConvolution(hidden_units, activation=tf.tanh, name='GCN_1')([X_in, A_hat])
+    gc2 = GraphConvolution(hidden_units, activation=tf.tanh, name='GCN_2')([gc1, A_hat])
+    gc3 = GraphConvolution(1, activation=None, name='GCN_3')([gc2, A_hat])
     
-    # Zweite GCN-Schicht.
-    gc2 = GraphConvolution(hidden_units)([gc1, A_hat])
+    scaled = layers.Lambda(spread_out_fn, name='SpreadOut')(gc3)
+    sigmoid_out = layers.Activation('sigmoid', name='SigmoidOut')(scaled)
+    output_reshaped = layers.Reshape((num_nodes,), name='Reshape')(sigmoid_out)
     
-    # Angenommen gc2 hat Form (batch_size, num_nodes, 16).
-
-    # 1) Erste Dense-Schicht (16 Neuronen)
-    fc1 = layers.TimeDistributed(
-    layers.Dense(16, activation='relu'),
-    name='FullyConnected_1'
-    )(gc2)  # Ergebnis: (batch_size, num_nodes, 16)
-
-    # 2) Zweite Dense-Schicht (16 Neuronen)
-    fc2 = layers.TimeDistributed(
-    layers.Dense(16, activation='relu'),
-    name='FullyConnected_2'
-    )(fc1)  # Ergebnis: (batch_size, num_nodes, 16)
-
-    # 3) Letzte Dense-Schicht (1 Neuron, Sigmoid)
-    fc3 = layers.TimeDistributed(
-    layers.Dense(1, activation='sigmoid'),
-    name='FullyConnected_3'
-    )(fc2)  # Ergebnis: (batch_size, num_nodes, 1)
-
-    # Reshape auf (batch_size, num_nodes)
-    outputs = layers.Reshape((num_nodes,))(fc3)
-    
-    # Erstelle das Modell.
-    model = Model(inputs=[X_in, A_in], outputs=outputs, name='GCN_ClusterHead')
+    model = Model(inputs=[X_in, A_in], outputs=output_reshaped, name='GCN_ClusterHead')
     return model
 
-#############################################
-# 4) Beispiel für die Verwendung
-#############################################
-if __name__ == '__main__':
-    # Beispiel: 100 Knoten, 6 Features
+def compute_reward(consumed_energy, repeated_penalty, proximity_penalty, ch_ratio_penalty):
+    
+    alpha = 1.0  # Gewichtung für den Energieverbrauch 
+    beta  = 1.5  # Gewichtung für Wiederholungsstrafe
+    gamma = 1.5  # Gewichtung für Proximitätsstrafe
+    delta = 1.5  # Gewichtung für den CH-Anteil
+
+    reward_energy = -alpha * consumed_energy
+    total_reward = reward_energy - beta * repeated_penalty - gamma * proximity_penalty - delta * ch_ratio_penalty
+    return total_reward
+
+
+def rl_train_step(model, X, A, consumed_energy, optimizer,
+                  repeated_penalty, proximity_penalty, ch_ratio_penalty):
+    # Gesamtreward aus allen Komponenten berechnen
+    total_reward = compute_reward(consumed_energy, repeated_penalty, proximity_penalty, ch_ratio_penalty)
+    
+    with tf.GradientTape() as tape:
+        probs = model([X, A])
+        actions = tf.cast(probs >= 0.7, tf.float32)
+        log_probs = actions * tf.math.log(probs + 1e-8) + (1 - actions) * tf.math.log(1 - probs + 1e-8)
+        loss = -tf.reduce_mean(log_probs) * total_reward
+    gradients = tape.gradient(loss, model.trainable_variables)
+    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+    return loss
+
+# Beispiel zum Testen des Modells
+def test_gcn_architecture():
     num_nodes = 100
     feature_dim = 6
-    model = build_gcn_model(num_nodes, feature_dim, hidden_units=16)
-    
-    # Modellübersicht anzeigen
+    hidden_units = 256
+
+    model = build_gcn_model(num_nodes, feature_dim, hidden_units)
     model.summary()
     
-    # Dummy-Daten erstellen mit batch_size = 1 (also ein einzelner Graph)
-    X_dummy = tf.random.normal(shape=(1, num_nodes, feature_dim))
-    A_dummy = tf.random.uniform(shape=(1, num_nodes, num_nodes),
-                                minval=0, maxval=2, dtype=tf.int32)
-    A_dummy = tf.cast(A_dummy, tf.float32)
+    X_dummy = tf.random.uniform(shape=(1, num_nodes, feature_dim), minval=0, maxval=100, dtype=tf.float32)
+    A_dummy = tf.cast(tf.random.uniform(shape=(1, num_nodes, num_nodes), minval=0, maxval=1) < 0.4, tf.float32)
     
-    # Vorhersage abrufen
-    y_pred = model([X_dummy, A_dummy])
-    print("Shape der Ausgabe:", y_pred.shape)  # Erwartet: (1, 100)
-    print("Ausgabe-Werte:", y_pred)
+    outputs = model([X_dummy, A_dummy])
+    print("Final Output values:\n", outputs.numpy())
+
+if __name__ == '__main__':
+    test_gcn_architecture()
