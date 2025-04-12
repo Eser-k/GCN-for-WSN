@@ -5,7 +5,7 @@ function Sensors=ConfigureSensors(Model,n,GX,GY)
 %% Configuration EmptySensor
 EmptySensor.xd=0;
 EmptySensor.yd=0;
-EmptySensor.G=0;
+%EmptySensor.G=0;
 EmptySensor.df=0;
 EmptySensor.type='N';
 EmptySensor.E=0; 
@@ -23,7 +23,7 @@ for i=1:1:n
     %set y location
     Sensors(i).yd=GY(i);
     %Determinate whether in previous periods has been clusterhead or not? not=0 and be=n
-    Sensors(i).G=0;
+    %Sensors(i).G=0;
     %dead flag. Whether dead or alive S(i).df=0 alive. S(i).df=1 dead.
     Sensors(i).df=0; 
     %initially there are not each cluster heads 
