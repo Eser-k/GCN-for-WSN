@@ -12,7 +12,7 @@ function A = createAdjacencyMatrix(Sensors, Model)
 %             (A(i,j)=1, wenn Sensor i und Sensor j verbunden sind, sonst 0)
 
     n = Model.n;          % Anzahl der Sensoren (ohne Sink)
-    RR = Model.RR;        % Funkreichweite als Nachbarschaftsschwelle
+    adjacencyDistance = 30;        
     A = zeros(n, n);      % Preallocation der Adjazenzmatrix
 
     % Für jeden Sensor-Paar (i,j) die euklidische Distanz berechnen
@@ -24,7 +24,7 @@ function A = createAdjacencyMatrix(Sensors, Model)
             else
                 distance = sqrt((Sensors(i).xd - Sensors(j).xd)^2 + ...
                                 (Sensors(i).yd - Sensors(j).yd)^2);
-                if distance <= RR
+                if distance <= adjacencyDistance
                     A(i,j) = 1;
                 else
                     A(i,j) = 0;
