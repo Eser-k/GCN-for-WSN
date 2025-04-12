@@ -18,7 +18,7 @@ function X = createFeatureMatrix(Sensors, Model)
 
     for i = 1:n
         % Feature 1: Restenergie
-        X(i,1) = Sensors(i).E;
+        X(i,1) = Sensors(i).E * 1000;
         % Feature 2 & 3: x- und y-Koordinate
         X(i,2) = Sensors(i).xd;
         X(i,3) = Sensors(i).yd;
